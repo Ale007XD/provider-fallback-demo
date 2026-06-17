@@ -1,27 +1,27 @@
 # provider-fallback-demo
 
-Демонстрация тезиса **State > Model** на реальном стеке [llm-nano-vm](https://github.com/Ale007XD/nano_vm).
+Demonstrates the **State > Model** thesis on the real [llm-nano-vm](https://github.com/Ale007XD/nano_vm) stack.
 
-> "What happens if your model disappears tomorrow?"
+> "What happens if your model becomes unavailable mid-task?"
 
-После [истории с Fable](https://techcrunch.com/2025/06/13/fable-shuts-down-after-anthropic-restricts-access-to-its-ai-model/) это не абстракция.
+In June 2026, access to two Anthropic models (Claude Fable 5 and Claude Mythos 5) was suspended worldwide in response to a government export control directive — with no advance warning to the companies depending on them. Closed-model access can be revoked at any time, for reasons that have nothing to do with the model's technical performance. This demo treats that as an architectural problem, not a hypothetical one.
 
 ---
 
-## Что показывает демо
+## What the demo shows
 
-Кредитная заявка проходит через FSM-пайплайн из трёх шагов.
-На шаге `verify_income` основной провайдер (Claude) падает.
-FSM переключается на резервный (GPT) и завершает задачу.
+A credit application pipeline runs through a three-step FSM.
+At the `verify_income` step, the primary provider (Claude) becomes unavailable.
+The FSM switches to a backup provider (GPT) and completes the task.
 
-Два сценария отказа:
+Two failure scenarios:
 
-| Сценарий | Поведение |
+| Scenario | Behavior |
 |---|---|
-| `--failure-mode retry` | Провайдер деградирует: 3 попытки → `RetryLimitExceeded` → switch |
-| `--failure-mode hard` | Провайдер исчезает: 1 попытка → `ProviderUnavailable` → switch |
+| `--failure-mode retry` | Provider degrades: 3 attempts → `RetryLimitExceeded` → switch |
+| `--failure-mode hard` | Provider disappears: 1 attempt → `ProviderUnavailable` → switch |
 
-Оба сценария завершаются одинаково:
+Both scenarios finish the same way:
 
 ```
 final_status: SUCCESS
@@ -30,7 +30,7 @@ provider_final: gpt
 
 ---
 
-## Архитектурный тезис
+## Architectural thesis
 
 ```
 Traditional Agent:         nano-vm:
@@ -44,13 +44,13 @@ FAIL               Claude → ✗ → GPT → ✓
                           COMPLETE
 ```
 
-Система не делает ставку на провайдера. Она делает ставку на сохранение состояния.
+The system does not bet on a provider. It bets on preserving state.
 
-FSM определяет путь. LLM генерирует сигнал внутри шага. Провайдер — деталь реализации.
+The FSM determines the path. The LLM produces a signal inside a step. The provider is an implementation detail.
 
 ---
 
-## Вывод `--both`
+## Output of `--both`
 
 ```
 === Scenario: RETRY ===
@@ -113,55 +113,63 @@ RECEIPT:
 
 ---
 
-## Почему одинаковый `trace_hash`
+## Why `trace_hash` is identical
 
-Оба сценария проходят идентичный путь через FSM-граф: `set_step_s1 → s1_collect → set_step_s2 → try_s2 → check_s2_result → switch_provider → s2_after_switch → s3_setup → s3_decision → approved`.
+Both scenarios traverse the identical FSM path: `set_step_s1 → s1_collect → set_step_s2 → try_s2 → check_s2_result → switch_provider → s2_after_switch → s3_setup → s3_decision → approved`.
 
-Retry-логика инкапсулирована внутри TOOL-шага `try_s2` — FSM не видит отдельных попыток, только итоговый результат шага.
+The retry logic is encapsulated inside the `try_s2` TOOL step — the FSM never sees individual attempts, only the step's final result.
 
-`trace_hash = SHA-256(Merkle(step_results))`. Когда FSM-путь совпадает — хэши совпадают. Это свойство архитектуры, не случайность: **одинаковый путь → одинаковое состояние → одинаковый receipt**.
+`trace_hash = SHA-256(Merkle(step_results))`. When the FSM path matches, the hashes match. This is a property of the construction, not a coincidence: **same path → same state → same receipt**.
 
 ---
 
-## Реализация
+## Implementation
 
-### Паттерн: перехватываемый отказ через TOOL
+### Pattern: interceptable failure via TOOL
 
-LLM-шаг в nano-vm падает → FSM помечает шаг FAILED и останавливается.
-Чтобы FSM мог ветвиться на отказе провайдера — отказ перехватывается внутри TOOL:
+An LLM step in nano-vm that fails marks the step `FAILED` and stops the trace.
+For the FSM to branch on a provider failure, the failure is intercepted inside a TOOL:
 
 ```
-TOOL attempt_llm_step   → возвращает 1 (success) или 0 (failed)
+TOOL attempt_llm_step   → returns 1 (success) or 0 (failed)
 CONDITION $provider_ok < 1  → then: switch_provider
                               otherwise: s3_setup
-TOOL do_switch_provider → обновляет current_provider
-TOOL attempt_llm_step   → повторяет на новом провайдере
+TOOL do_switch_provider → updates current_provider
+TOOL attempt_llm_step   → retries on the new provider
 ```
 
-FSM видит только успешные переходы. Отказ провайдера — управляемое событие, не исключение.
+The FSM only ever sees successful transitions. Provider failure is a governed event, not an exception.
 
-### Файлы
+### Files
 
 ```
 provider_demo/
 ├── receipt_demo.py   # CLI: --failure-mode retry|hard|--both
-├── programs.py       # FSM-программа (provider-agnostic DSL)
-├── providers.py      # MockAdapter + FailureConfig (инъекция отказов)
+├── programs.py       # FSM program (provider-agnostic DSL)
+├── providers.py      # MockAdapter + FailureConfig (failure injection)
 └── tools.py          # attempt_llm_step, do_switch_provider, set_current_step
 ```
 
+### Known limits
+
+- `ExecutionVM.run()` is async — every tool that calls the LLM adapter must be `async def`
+- ASTEngine conditions do not support string literals as the right-hand side of a comparison (parses, always evaluates `False`); the working pattern is a numeric sentinel via `output_key`, checked as `$var < 1` / `$var > 0`
+- Fallback chain is a fixed list (`claude → gpt → qwen`), not a scored or ranked choice
+- `MockAdapter` does not call a real provider API — responses are deterministic by design so the demo runs without API keys
+
 ---
 
-## Что дальше
+## What's next
 
-- **Этап 2**: Streamlit-визуализация — FSM-граф + живой трейс + Receipt справа
-- **`outcome_hash`**: хэш только над `(program_name, final_status, key_outputs)` — инвариант относительно провайдера
-- **Execution Equivalence**: `Trace_A ≠ Trace_B`, но `Outcome(A) = Outcome(B)` → формальное отношение эквивалентности
+- **Stage 2**: Streamlit visualization — FSM graph + live trace + Receipt panel
+- **`outcome_hash`**: a hash over `(program_name, final_status, key_outputs)` only — invariant with respect to provider
+- **Execution Equivalence**: `Trace_A ≠ Trace_B`, but `Outcome(A) = Outcome(B)` → a formal equivalence relation
 
 ---
 
-## Связанные проекты
+## Related projects
 
 - [llm-nano-vm](https://pypi.org/project/llm-nano-vm/) — FSM execution kernel
-- [nano-vm-mcp](https://github.com/Ale007XD/nano-vm-mcp) — MCP gateway с governance
-- [kyc-demo-streamlit](https://github.com/Ale007XD/kyc-demo-streamlit) — governance layer над KYC-пайплайном
+- [nano-vm-mcp](https://github.com/Ale007XD/nano-vm-mcp) — MCP gateway with governance
+- [kyc-demo-streamlit](https://github.com/Ale007XD/kyc-demo-streamlit) — governance layer over a KYC pipeline
+- 
