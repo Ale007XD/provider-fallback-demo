@@ -1,1 +1,1 @@
-llm-nano-vm>=0.8.6
+llm-nano-vm[litellm]>=0.8.6
